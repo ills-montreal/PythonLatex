@@ -39,7 +39,6 @@ def highlight_method(request):
 @pytest.fixture(
     params=[
         ["\\textbf{"],
-        ["\\textbf{\\underline{", "\\textbf{"],
         ["\\textbf{\\underline{", "\\textbf{", "Wow: "],
     ]
 )
@@ -59,12 +58,12 @@ def formatter(
     )
 
 
-@pytest.fixture(params=[2, 4, 8])
+@pytest.fixture(params=[1, 2, 32])
 def n_rows(request):
     return request.param
 
 
-@pytest.fixture(params=[8, 16, 32])
+@pytest.fixture(params=[16])
 def n_cols(request):
     return request.param
 

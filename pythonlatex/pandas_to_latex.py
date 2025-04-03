@@ -21,6 +21,7 @@ class PandasTable:
         self.rotate = rotate
         self.add_std = add_std
         self.multicols = multicols
+        self.order = "max" if higlighter == "max" else "min"
 
         self.highlight_method: HighlightFormatter = (
             HighlightFormatter(
@@ -84,10 +85,10 @@ class PandasTable:
 
         # Get mean and std of the dataframe
         df_m = df_base.groupby([self.rows, self.cols])[self.values].mean().reset_index()
-        df_m[self.cols] = df_m[self.cols] + " mean"
+        df_m[self.cols] = df_m[self.cols] + "***mean"
         # Get std of the dataframe
         df_v = df_base.groupby([self.rows, self.cols])[self.values].std().reset_index()
-        df_v[self.cols] = df_v[self.cols] + " std"
+        df_v[self.cols] = df_v[self.cols] + "***std"
         # Join the mean and std dataframes to a new one
         df_mean_std = df_m.pivot_table(
             index=self.rows, columns=self.cols, values=self.values
@@ -105,19 +106,31 @@ class PandasTable:
 
         if self.multicols is not None:
             m = self._get_multicols_with_mean_std(df_mean_std)
-            df_mean_std[" mean"] = full_avg
-            df_mean_std[" std"] = ful_std
+            df_mean_std["***mean"] = full_avg
+            df_mean_std["***std"] = ful_std
             self._round_values(df_mean_std)
             df_mean_std.columns = pd.MultiIndex.from_tuples(
                 [tuple(m[c]) for c in df_mean_std.columns]
             )
         else:
             df_mean_std["avg"] = full_avg
-            df_mean_std["avg std"] = ful_std
+            df_mean_std["avg***std"] = ful_std
             self._round_values(df_mean_std)
-            df_mean_std.columns = [c.replace(" mean", "") for c in df_mean_std.columns]
+            df_mean_std.columns = [
+                c.replace("***mean", "") for c in df_mean_std.columns
+            ]
 
         df_mean_std.index = df_mean_std.index.str.replace("_", " ")
+
+        if self.order == "max":
+            df_mean_std = df_mean_std.reindex(
+                df_mean_std.mean(axis=1).sort_values(ascending=False).index.tolist()
+            )
+        elif self.order == "min":
+            df_mean_std = df_mean_std.reindex(
+                df_mean_std.mean(axis=1).sort_values(ascending=True).index.tolist()
+            )
+
         return df_mean_std
 
     def _get_multicols_with_mean_std(self, df) -> Dict[str, List[str]]:
@@ -133,18 +146,18 @@ class PandasTable:
         m = {}
         n_multicols: int = -1
         for c in df.columns:
-            col = c.replace(" mean", "").replace(" std", "")
+            col = c.replace("***mean", "").replace("***std", "")
             assert col in self.multicols, f"Column name {col} not found in multicols"
             m[c] = deepcopy(self.multicols[col])
-            m[c][-1] = m[c][-1] + c.split(" ")[1].replace("mean", "").replace(
-                "std", " std"
+            m[c][-1] = m[c][-1] + c.split("***")[1].replace("mean", "").replace(
+                "std", "***std"
             )
             assert n_multicols == -1 or n_multicols == len(
                 m[c]
             ), "Number of multicols is not consistent"
             n_multicols = len(m[c])
-        m[" mean"] = [""] * (n_multicols - 1) + ["avg"]
-        m[" std"] = [""] * (n_multicols - 1) + ["avg std"]
+        m["***mean"] = [""] * (n_multicols - 1) + ["avg"]
+        m["***std"] = [""] * (n_multicols - 1) + ["avg***std"]
         return m
 
     def _round_values(self, df: pd.DataFrame):
@@ -163,12 +176,17 @@ class PandasTable:
             cols_to_keep = [col for col in df.columns if not col.endswith("std")]
         df = self.highlight_method(df, cols_to_keep, add_std=self.add_std)
         df = df[cols_to_keep]
+
+        # Order the columns so they are grouped by the first level of the multiindex
+        if self.multicols is not None:
+            df = df[sorted(df.columns, key=lambda x: x[0])]
+
         if self.rotate == "+":
             col_prefix = "\\rotatebox{90}{\\shortstack{"
         elif self.rotate == "-":
             col_prefix = "\\rotatebox{-90}{\\shortstack{"
         else:
-            col_prefix = ""
+            col_prefix = "\\shortstack{"
 
         def join_col_names(col: Union[List[str], str]) -> str:
             if isinstance(col, str):
@@ -191,7 +209,7 @@ class PandasTable:
         col_format = "r|"
         prev_cols = "This is not a column name that will be used"
         for col in style.columns:
-            ov_col = col[len(col_prefix) :].split(" \\\\")[0]
+            ov_col = col.split("\\\\")[0]
             if prev_cols != ov_col:
                 col_format += "|"
                 prev_cols = ov_col
