@@ -13,6 +13,7 @@ class PandasTableFormatter:
         aggregation_methods: List[Any] = ["mean", "std"],
         main_subset: int = 0,
         total_col_name: str = "AVG.",
+        hide_agg_labels: bool = True,
     ):
         """
         PandasTableFormatter is a class that formats a Pandas DataFrame into a LaTeX
@@ -26,6 +27,8 @@ class PandasTableFormatter:
         """
         self.n_decimals = n_decimals
         self.aggregation_methods = aggregation_methods
+        self.hide_agg_labels = hide_agg_labels
+
         for agg in self.aggregation_methods:
             if not isinstance(agg, str) and not callable(agg):
                 raise ValueError(
@@ -185,7 +188,6 @@ class PandasTableFormatter:
         values: str,
         highlight_fn: Callable[[np.ndarray | pd.Series], float] = np.nanmax,
         props: List[str] = ["font-weight: bold;"],
-        hide_agg_labels: bool = True,
         special_format_agg: Dict[str, Callable[[str], str]] = {
             "std": lambda x: "\\tiny $\\pm$" + x
         },
@@ -231,7 +233,7 @@ class PandasTableFormatter:
                 subset=([c for c in df_agg.columns if c[-1] == self.main_agg]),
             )
 
-        if hide_agg_labels:
+        if self.hide_agg_labels:
             style = style.hide(axis="columns", level=df_agg.columns.nlevels - 1)
         return style
 
