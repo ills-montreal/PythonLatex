@@ -1,46 +1,81 @@
-from typing import Union, List, Dict, Optional
-from copy import deepcopy
-
-import pandas as pd
+from functools import partial
+from typing import Union, List, Callable, Dict, Any
 import numpy as np
 
-from pythonlatex.highlight_formatter import HighlightFormatter
+import pandas as pd
+from pandas.io.formats.style import Styler
 
 
-class PandasTable:
+class PandasTableFormatter:
     def __init__(
         self,
-        df: pd.DataFrame,
-        higlighter: Union[str, HighlightFormatter] = "max",
         n_decimals: int = 3,
-        rotate: str = "",
-        add_std: bool = True,
-        multicols: Optional[Dict[str, List[str]]] = None,
+        aggregation_methods: List[Any] = ["mean", "std"],
+        main_subset: int = 0,
+        total_col_name: str = "AVG.",
     ):
+        """
+        PandasTableFormatter is a class that formats a Pandas DataFrame into a LaTeX
+        table with custom aggregation methods and styles.
+
+        The 'main_subset' parameter is used to specify which aggregation methods should be used
+        to compare the different rows in the table (often the mean). These aggregagtion results
+        will be the one highlighted in the latex table.
+
+        If main_subset is specified, a column ($NAME, agg$) will be created with the aggregation method
+        """
         self.n_decimals = n_decimals
-        self.rotate = rotate
-        self.add_std = add_std
-        self.multicols = multicols
-        self.order = "max" if higlighter == "max" else "min"
+        self.aggregation_methods = aggregation_methods
+        for agg in self.aggregation_methods:
+            if not isinstance(agg, str) and not callable(agg):
+                raise ValueError(
+                    "Aggregation methods must be either a string or a callable function"
+                )
+            elif callable(agg):
+                if not hasattr(agg, "__name__"):
+                    raise ValueError(
+                        "Aggregation function must have a __name__ attribute"
+                    )
+        assert (
+            0 <= main_subset < len(aggregation_methods)
+        ), "main_subset must be an integer between 0 and the number of aggregation methods"
 
-        self.highlight_method: HighlightFormatter = (
-            HighlightFormatter(
-                highlight_method="max",
-                highlight_format=["\\textbf{"],
-            )
-            if isinstance(higlighter, str)
-            else higlighter
-        )
+        self.main_subset = main_subset
+        if isinstance(aggregation_methods[main_subset], str):
+            self.main_agg = aggregation_methods[main_subset]
+        elif hasattr(aggregation_methods[main_subset], "__main__"):
+            self.main_agg = aggregation_methods[main_subset].__name__
+        self.total_col_name = total_col_name
 
-        self.or_df = df.copy()
-        self.style: pd.DataFrame = None
-        self.latex: str = ""
+    def _find_k_th_fn(
+        self,
+        s: np.ndarray | pd.Series,
+        fn: Callable[[np.ndarray | pd.Series], float],
+        k: int,
+        props="",
+    ) -> List[str]:
+        """
+        Highlight the top k values in a dataframe using the prop string.
 
-        self.rows: str = ""
-        self.cols: str = ""
-        self.values: str = ""
+        :param s: The input array or series to be processed.
+        :param fn: The function to be applied to the input.
+        :param k: The number of top values to highlight.
+        :param props: The properties to be applied to the highlighted values.
 
-    def _aggregate_results_with_std(self, df_base: pd.DataFrame) -> pd.DataFrame:
+        :return: A list of strings with the highlighted values.
+        """
+        ps = np.where(s == fn(s), True, False)
+        for _ in range(1, k):
+            ps = np.where(s == fn(s[~ps]), True, False)
+        return [props if p else "" for p in ps]
+
+    def _aggregate_results_and_pivot(
+        self,
+        df_base: pd.DataFrame,
+        rows: str | List[str],
+        cols: str | List[str],
+        values: str,
+    ) -> pd.DataFrame:
         """
         Aggregates the given dataframe by computing the mean and standard deviation for a specified
         metric, organizing the results in a structured format.
@@ -63,195 +98,179 @@ class PandasTable:
         Example with multicols {"A": ["category1", "A"], "B": ["category1", "B"], "C": ["category2", "C"]}:
             df_base = pd.DataFrame(
                 {
-                    "name": ["a", "a", "a", "a", "a", "a", "b", "b", "b", "b", "b", "b"],
-                    "category": ["A", "A", "B", "B", "C", "C", "A", "A", "B", "B", "C", "C"],
-                    "value": [0,1,2,2,0,1,0,1,2,2,0,1],
+                    "name": ["a", "a", "a", "a", "b", "b", "b", "b"],
+                    "category": ["A", "A", "B", "B", "A", "A", "B", "B"],
+                    "value": [0,1,2,2,0,1,2,2],
                 }
             )
             self._aggregate_results_with_std(df_base)
 
             >> Output:
-                                    |       category1                        |       category2
-                 avg mean   avg std   A mean    A std    B mean      B std      C mean        C std
-            a       1        0.9        0.5       0.7        2          0          0.5        0.7
-            b       1        0.9        0.5       0.7        2          0          0.5        0.7
+                 avg    avg   A    A    B    B
+                mean   std  mean  std  mean std
+            a    0.5   0.5   1    1    2    0
+            b    0.5   0.5   1    1    2    0
 
 
         :param df_base: The base dataframe containing the data to be aggregated.
+        :param rows: The column(s) to be used as rows in the resulting dataframe.
+        :param cols: The column(s) to be used as columns in the resulting dataframe.
+        :param values: The column(s) to be used as values in the resulting dataframe.
+        :param aggregation_methods: The aggregation functions to be applied to the values.
 
         :return:  A formatted dataframe containing aggregated mean and standard
         deviation values.
         """
-
-        # Get mean and std of the dataframe
-        df_m = df_base.groupby([self.rows, self.cols])[self.values].mean().reset_index()
-        df_m[self.cols] = df_m[self.cols] + "***mean"
-        # Get std of the dataframe
-        df_v = df_base.groupby([self.rows, self.cols])[self.values].std().reset_index()
-        df_v[self.cols] = df_v[self.cols] + "***std"
         # Join the mean and std dataframes to a new one
-        df_mean_std = df_m.pivot_table(
-            index=self.rows, columns=self.cols, values=self.values
-        ).join(df_v.pivot_table(index=self.rows, columns=self.cols, values=self.values))
-        df_mean_std.dropna(axis=1, inplace=True)
-        df_mean_std.index.name = None
-
-        # Get the average over all values
-        full_avg = df_m.pivot_table(
-            index=self.rows, columns=self.cols, values=self.values
-        ).mean(axis=1)
-        ful_std = df_m.pivot_table(
-            index=self.rows, columns=self.cols, values=self.values
-        ).std(axis=1)
-
-        if self.multicols is not None:
-            m = self._get_multicols_with_mean_std(df_mean_std)
-            df_mean_std["***mean"] = full_avg
-            df_mean_std["***std"] = ful_std
-            self._round_values(df_mean_std)
-            df_mean_std.columns = pd.MultiIndex.from_tuples(
-                [tuple(m[c]) for c in df_mean_std.columns]
+        dataframes_to_concatenate = []
+        df_glob = []
+        for i_agg_meth, agg in enumerate(self.aggregation_methods):
+            df_agg = df_base.pivot_table(
+                index=rows, columns=cols, values=values, aggfunc=agg
             )
-        else:
-            df_mean_std["avg"] = full_avg
-            df_mean_std["avg***std"] = ful_std
-            self._round_values(df_mean_std)
-            df_mean_std.columns = [
-                c.replace("***mean", "") for c in df_mean_std.columns
-            ]
-
-        df_mean_std.index = df_mean_std.index.str.replace("_", " ")
-
-        if self.order == "max":
-            df_mean_std = df_mean_std.reindex(
-                df_mean_std.mean(axis=1).sort_values(ascending=False).index.tolist()
-            )
-        elif self.order == "min":
-            df_mean_std = df_mean_std.reindex(
-                df_mean_std.mean(axis=1).sort_values(ascending=True).index.tolist()
+            df_agg.columns = pd.MultiIndex.from_arrays(
+                [df_agg.columns.get_level_values(i) for i in range(len(cols))]
+                + [
+                    pd.Index(
+                        [agg if isinstance(agg, str) else agg.__name__]
+                        * df_agg.shape[1],
+                        name="agg",
+                    )
+                ],
+                names=cols + ["agg"] if isinstance(cols, list) else [cols, "agg"],
             )
 
-        return df_mean_std
+            if i_agg_meth == self.main_subset:
+                for agg_b in self.aggregation_methods:
+                    df_glob_agg = df_agg.agg(agg_b, axis=1)
+                    df_glob_agg = df_glob_agg.to_frame(
+                        name=agg_b if isinstance(agg_b, str) else agg_b.__name__
+                    )
+                    df_glob_agg.columns = pd.MultiIndex.from_arrays(
+                        [
+                            pd.Index(
+                                [" " if i < len(cols) - 1 else self.total_col_name],
+                                name=cols[i],
+                            )
+                            for i in range(len(cols))
+                        ]
+                        + [
+                            pd.Index(
+                                [agg_b if isinstance(agg_b, str) else agg_b.__name__],
+                                name="agg",
+                            )
+                        ],
+                        names=(
+                            cols + ["agg"] if isinstance(cols, list) else [cols, "agg"]
+                        ),
+                    )
+                    df_glob.append(df_glob_agg)
+            dataframes_to_concatenate.append(df_agg)
+        df_agg = pd.concat(dataframes_to_concatenate, axis=1)
+        df_glob = pd.concat(df_glob, axis=1)
 
-    def _get_multicols_with_mean_std(self, df) -> Dict[str, List[str]]:
-        """
-        From a dictionary of multicols, get the multicols for the new dataframe, where mean and
-        std are added to the column names.
-        :param df: The dataframe to get the multicols from
+        df_agg = pd.concat([df_agg, df_glob], axis=1)
+        df_agg.index.name = None
+        df_agg = df_agg.reindex(
+            sorted(df_agg.columns, key=lambda x: tuple(x[:-1])),
+            axis=1,
+        )
+        return df_agg
 
-        :return: A dictionary with the new column names and the multicols
+    def style(
+        self,
+        df: pd.DataFrame,
+        rows: str | List[str],
+        cols: str | List[str],
+        values: str,
+        highlight_fn: Callable[[np.ndarray | pd.Series], float] = np.nanmax,
+        props: List[str] = ["font-weight: bold;"],
+        hide_agg_labels: bool = True,
+        special_format_agg: Dict[str, Callable[[str], str]] = {
+            "std": lambda x: "\\tiny $\\pm$" + x
+        },
+    ) -> Styler:
         """
-        if self.multicols is None:
-            raise ValueError("Multicols is None")
-        m = {}
-        n_multicols: int = -1
-        for c in df.columns:
-            col = c.replace("***mean", "").replace("***std", "")
-            assert col in self.multicols, f"Column name {col} not found in multicols"
-            m[c] = deepcopy(self.multicols[col])
-            m[c][-1] = m[c][-1] + c.split("***")[1].replace("mean", "").replace(
-                "std", "***std"
+        Applies the highlight method to the given dataframe and returns a styled dataframe.
+
+        :param df: The dataframe to be styled.
+        :return: A styled dataframe with highlighted values.
+        """
+        k = len(props)
+        df_agg = self._aggregate_results_and_pivot(
+            df,
+            rows=rows,
+            cols=cols,
+            values=values,
+        )
+
+        # Trick as there is a data leakage (pandas issue)
+        def wrap_special_format_agg(fn: Callable[[str], str]) -> Callable[[float], str]:
+            def wrapped(x: float) -> str:
+                x_str = str(np.round(x, self.n_decimals))
+                out = fn(x_str)
+                return out
+
+            return wrapped
+
+        formatter = {
+            c: wrap_special_format_agg(special_format_agg[c[-1]])
+            for c in df_agg.columns
+            if c[-1] in special_format_agg
+        }
+
+        style = df_agg.style.format(
+            formatter,
+            precision=self.n_decimals,
+        )
+
+        # Apply the highlight function to the specified columns
+        for i in range(1, k + 1):
+            style.apply(
+                partial(self._find_k_th_fn, fn=highlight_fn, k=i, props=props[i - 1]),
+                subset=([c for c in df_agg.columns if c[-1] == self.main_agg]),
             )
-            assert n_multicols == -1 or n_multicols == len(
-                m[c]
-            ), "Number of multicols is not consistent"
-            n_multicols = len(m[c])
-        m["***mean"] = [""] * (n_multicols - 1) + ["avg"]
-        m["***std"] = [""] * (n_multicols - 1) + ["avg***std"]
-        return m
 
-    def _round_values(self, df: pd.DataFrame):
+        if hide_agg_labels:
+            style = style.hide(axis="columns", level=df_agg.columns.nlevels - 1)
+        return style
+
+    def save_to_latex(
+        self,
+        style: Styler,
+        filename: str = "table.tex",
+        cols_sep: Union[str, int, None] = 0,
+        **kwargs,
+    ):
         """
-        Round the values of the dataframe to the specified number of decimals.
-        :param df:
-        :return:
+        Saves the styled dataframe to a LaTeX file.
+
+        :param style: The styled dataframe to be saved.
+        :param filename: The name of the LaTeX file.
         """
-        for col in df.columns:
-            df[col] = df[col].apply(lambda x: np.round(x, self.n_decimals))
-
-    def style_df_ci(self, df: pd.DataFrame):
-        if self.multicols is not None:
-            cols_to_keep = [col for col in df.columns if not col[-1].endswith("std")]
-        else:
-            cols_to_keep = [col for col in df.columns if not col.endswith("std")]
-        df = self.highlight_method(df, cols_to_keep, add_std=self.add_std)
-        df = df[cols_to_keep]
-
-        # Order the columns so they are grouped by the first level of the multiindex
-        if self.multicols is not None:
-            df = df[sorted(df.columns, key=lambda x: x[0])]
-
-        if self.rotate == "+":
-            col_prefix = "\\rotatebox{90}{\\shortstack{"
-        elif self.rotate == "-":
-            col_prefix = "\\rotatebox{-90}{\\shortstack{"
-        else:
-            col_prefix = "\\shortstack{"
-
-        def join_col_names(col: Union[List[str], str]) -> str:
-            if isinstance(col, str):
-                return col
-            c = ""
-            for i, name in enumerate(col):
-                if i > 0:
-                    c += "\\\\"
-                c += name
-            return c
-
-        df.columns = [
-            col_prefix
-            + join_col_names(col)
-            + "}" * (col_prefix.count("{") - col_prefix.count("}"))
-            for col in df.columns
-        ]
-
-        style = df.style
-        col_format = "r|"
-        prev_cols = "This is not a column name that will be used"
-        for col in style.columns:
-            ov_col = col.split("\\\\")[0]
-            if prev_cols != ov_col:
-                col_format += "|"
-                prev_cols = ov_col
-            col_format += "c"
-        col_format += "|"
+        if "convert_css" in kwargs and not kwargs["convert_css"]:
+            print(
+                "Warning: 'convert_css' has to be set to True for most cases. Setting to True."
+            )
+            del kwargs["convert_css"]
+        if cols_sep is not None:
+            if isinstance(cols_sep, int):
+                # cols reprents the level of the multindex we want to separate
+                assert cols_sep <= style.data.columns.nlevels - 1
+                kwargs["column_format"] = "c"
+                prev_col_name = "************"
+                for c in style.data.columns:
+                    if c[cols_sep] != prev_col_name:
+                        kwargs["column_format"] += "|c"
+                        prev_col_name = c[cols_sep]
+                    else:
+                        kwargs["column_format"] += "c"
+            elif isinstance(cols_sep, str):
+                kwargs["column_format"] = cols_sep
 
         latex = style.to_latex(
-            column_format=col_format,
-            siunitx=True,
+            convert_css=True,
+            **kwargs,
         )
-        return df, style, latex
-
-    def __getitem__(self, item):
-        """
-        Returns the processed dataframe, where rows are item[0] and columns are item[1] and values are item[2]
-        :param item:
-            item[0]: rows
-            item[1]: columns
-            item[2]: values
-        :return:
-        """
-        self.rows, self.cols, self.values = item
-        df = self.or_df.copy()
-        df = self._aggregate_results_with_std(df)
-        df, style, latex = self.style_df_ci(df)
-
-        self.style = style
-        self.latex = latex
-
-        return df
-
-    def save_latex(self, path: str):
-        """
-        Save the latex table to a file
-        :param path:
-            Path to save the latex table
-        :return:
-        """
-        if self.latex is None:
-            raise ValueError(
-                "Latex table not generated yet. Use __getitem__ to generate it."
-            )
-
-        with open(path, "w") as f:
-            f.write(self.latex)
+        with open(filename, "w") as f:
+            f.write(latex)
