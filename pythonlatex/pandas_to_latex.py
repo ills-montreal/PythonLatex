@@ -1,6 +1,7 @@
 from functools import partial
 from typing import Union, List, Callable, Dict, Any
 import numpy as np
+import warnings
 
 import pandas as pd
 from pandas.io.formats.style import Styler
@@ -14,6 +15,7 @@ class PandasTableFormatter:
         main_subset: int = 0,
         total_col_name: str = "AVG.",
         hide_agg_labels: bool = True,
+        already_rotated: bool = False,
     ):
         """
         PandasTableFormatter is a class that formats a Pandas DataFrame into a LaTeX
@@ -28,6 +30,7 @@ class PandasTableFormatter:
         self.n_decimals = n_decimals
         self.aggregation_methods = aggregation_methods
         self.hide_agg_labels = hide_agg_labels
+        self.already_rotated = already_rotated
 
         for agg in self.aggregation_methods:
             if not isinstance(agg, str) and not callable(agg):
@@ -174,10 +177,15 @@ class PandasTableFormatter:
 
         df_agg = pd.concat([df_agg, df_glob], axis=1)
         df_agg.index.name = None
-        df_agg = df_agg.reindex(
-            sorted(df_agg.columns, key=lambda x: tuple(x[:-1])),
-            axis=1,
-        )
+        try:
+            df_agg = df_agg.reindex(
+                sorted(df_agg.columns, key=lambda x: tuple(x[:-1])),
+                axis=1,
+            )
+        except TypeError:
+            warnings.warn(
+                "Warning: Unable to sort columns. Ensure that the columns are of the same type."
+            )
         return df_agg
 
     def style(
@@ -194,11 +202,29 @@ class PandasTableFormatter:
     ) -> Styler:
         """
         Applies the highlight method to the given dataframe and returns a styled dataframe.
+        If the Dataframe is already rotated, it will be melted first, where the columns denote
+        the columns to keep, and value is the name given to the columns in the dataframe once melted.
+
 
         :param df: The dataframe to be styled.
         :return: A styled dataframe with highlighted values.
         """
         k = len(props)
+        if self.already_rotated:
+            df = df.melt(
+                id_vars=rows,
+                value_vars=cols,
+                var_name=values,
+                value_name="value",
+            )
+            cols = values
+            values = "value"
+
+        if isinstance(rows, str):
+            rows = [rows]
+        if isinstance(cols, str):
+            cols = [cols]
+
         df_agg = self._aggregate_results_and_pivot(
             df,
             rows=rows,
@@ -237,6 +263,50 @@ class PandasTableFormatter:
             style = style.hide(axis="columns", level=df_agg.columns.nlevels - 1)
         return style
 
+    def get_latex(
+        self,
+        style: Styler,
+        cols_sep: Union[str, int, None] = 0,
+        **kwargs: Dict[str, Any],
+    ) -> str:
+        """
+        Returns the LaTeX representation of the styled dataframe.
+
+        :param style: The styled dataframe to be converted to LaTeX.
+        :param cols_sep: The column separator to use.
+        :param kwargs: Additional arguments to be passed to the LaTeX conversion.
+
+        :return: The LaTeX representation of the styled dataframe.
+        """
+        if "convert_css" in kwargs and not kwargs["convert_css"]:
+            print(
+                "Warning: 'convert_css' has to be set to True for most cases. Setting to True."
+            )
+            del kwargs["convert_css"]
+        if cols_sep is not None:
+            if "column_format" in kwargs:
+                del kwargs["column_format"]
+            column_format = ""
+            if isinstance(cols_sep, int):
+                # cols reprents the level of the multindex we want to separate
+                assert cols_sep <= style.data.columns.nlevels - 1
+                column_format = "c"
+                prev_col_name = "************"
+                for c in style.data.columns:
+                    if c[cols_sep] != prev_col_name:
+                        column_format += "|c"
+                        prev_col_name = c[cols_sep]
+                    else:
+                        column_format += "c"
+            elif isinstance(cols_sep, str):
+                column_format = cols_sep
+
+        return style.to_latex(
+            convert_css=True,
+            column_format=column_format,
+            **kwargs,
+        )
+
     def save_to_latex(
         self,
         style: Styler,
@@ -250,29 +320,6 @@ class PandasTableFormatter:
         :param style: The styled dataframe to be saved.
         :param filename: The name of the LaTeX file.
         """
-        if "convert_css" in kwargs and not kwargs["convert_css"]:
-            print(
-                "Warning: 'convert_css' has to be set to True for most cases. Setting to True."
-            )
-            del kwargs["convert_css"]
-        if cols_sep is not None:
-            if isinstance(cols_sep, int):
-                # cols reprents the level of the multindex we want to separate
-                assert cols_sep <= style.data.columns.nlevels - 1
-                kwargs["column_format"] = "c"
-                prev_col_name = "************"
-                for c in style.data.columns:
-                    if c[cols_sep] != prev_col_name:
-                        kwargs["column_format"] += "|c"
-                        prev_col_name = c[cols_sep]
-                    else:
-                        kwargs["column_format"] += "c"
-            elif isinstance(cols_sep, str):
-                kwargs["column_format"] = cols_sep
-
-        latex = style.to_latex(
-            convert_css=True,
-            **kwargs,
-        )
+        latex = self.get_latex(style, cols_sep, **kwargs)
         with open(filename, "w") as f:
             f.write(latex)
